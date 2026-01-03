@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rustmq
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+spec:
+  selector:
+    matchLabels:
+      app: rustmq
+  endpoints:
+  - port: metrics
+    interval: 10s
+    path: /metrics

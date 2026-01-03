@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-pipeline
+  labels:
+    app: rustmq
+    pod-security.kubernetes.io/enforce: baseline

@@ -1,0 +1,32 @@
+# Multi-stage build for RustMQ test producer
+FROM rust:1.91 AS builder
+
+WORKDIR /build
+
+# Copy Cargo files
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source and examples
+COPY src/ ./src/
+COPY examples/ ./examples/
+
+# Build the test producer example
+RUN cargo build --release --example k8s-test-producer
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/examples/k8s-test-producer /app/test-producer
+
+# Run as non-root user
+RUN useradd -m -u 1000 rustmq && chown -R rustmq:rustmq /app
+USER rustmq
+
+ENTRYPOINT ["/app/test-producer"]

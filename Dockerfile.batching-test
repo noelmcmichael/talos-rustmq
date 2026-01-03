@@ -1,0 +1,22 @@
+FROM rust:1.83-slim as builder
+
+WORKDIR /build
+
+# Copy manifest files
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source
+COPY src/ ./src/
+COPY examples/ ./examples/
+
+# Build the batching test binary
+RUN cargo build --release --example k8s-batching-test
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/examples/k8s-batching-test /usr/local/bin/batching-test
+
+ENTRYPOINT ["/usr/local/bin/batching-test"]

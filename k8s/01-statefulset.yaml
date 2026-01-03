@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rustmq
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+spec:
+  serviceName: rustmq-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rustmq
+  template:
+    metadata:
+      labels:
+        app: rustmq
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9094"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsNonRoot: true
+      containers:
+      - name: rustmq
+        image: harbor.int-talos-poc.pocketcove.net/library/rustmq:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9092
+          name: producer
+          protocol: TCP
+        - containerPort: 9093
+          name: consumer
+          protocol: TCP
+        - containerPort: 9094
+          name: metrics
+          protocol: TCP
+        env:
+        - name: RUSTMQ_DATA_DIR
+          value: "/data/rustmq"
+        - name: RUSTMQ_PARTITIONS
+          value: "12"
+        - name: RUSTMQ_PRODUCER_PORT
+          value: "9092"
+        - name: RUSTMQ_CONSUMER_PORT
+          value: "9093"
+        - name: RUSTMQ_METRICS_PORT
+          value: "9094"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: data
+          mountPath: /data/rustmq
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9094
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9094
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: local-path
+      resources:
+        requests:
+          storage: 10Gi

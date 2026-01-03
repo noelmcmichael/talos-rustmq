@@ -1,0 +1,90 @@
+---
+# Headless service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustmq-headless
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+spec:
+  clusterIP: None
+  selector:
+    app: rustmq
+  ports:
+  - port: 9092
+    name: producer
+  - port: 9093
+    name: consumer
+  - port: 9094
+    name: metrics
+
+---
+# ClusterIP service for internal clients
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustmq
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+spec:
+  type: ClusterIP
+  selector:
+    app: rustmq
+  ports:
+  - port: 9092
+    targetPort: 9092
+    name: producer
+    protocol: TCP
+  - port: 9093
+    targetPort: 9093
+    name: consumer
+    protocol: TCP
+
+---
+# Metrics service for Prometheus
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustmq-metrics
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+spec:
+  type: ClusterIP
+  selector:
+    app: rustmq
+  ports:
+  - port: 9094
+    targetPort: 9094
+    name: metrics
+    protocol: TCP
+
+---
+# LoadBalancer service for external access (BGP + VIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustmq-external
+  namespace: data-pipeline
+  labels:
+    app: rustmq
+    bgp: blue
+spec:
+  type: LoadBalancer
+  selector:
+    app: rustmq
+  ports:
+  - port: 9092
+    targetPort: 9092
+    name: producer
+    protocol: TCP
+  - port: 9093
+    targetPort: 9093
+    name: consumer
+    protocol: TCP
+  - port: 9094
+    targetPort: 9094
+    name: metrics
+    protocol: TCP

@@ -164,3 +164,4 @@ kubectl -n data-pipeline scale statefulset rustmq --replicas=3
 **Status:** Ready to deploy  
 **Platform:** Talos Kubernetes v1.31.2  
 **Last Updated:** January 2, 2026
+# RustMQ Build

@@ -26,7 +26,7 @@ spec:
         runAsNonRoot: true
       containers:
       - name: rustmq
-        image: harbor.int-talos-poc.pocketcove.net/library/rustmq:latest
+        image: harbor.int-talos-poc.pocketcove.net/library/rustmq:expert-fix-v2
         imagePullPolicy: Always
         ports:
         - containerPort: 9092

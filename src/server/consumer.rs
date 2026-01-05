@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// ConsumerServer serves messages to consumers via TCP
 pub struct ConsumerServer {
@@ -62,6 +62,14 @@ async fn handle_consumer_connection(
         let start_offset = socket.read_u64().await?;
         let max_bytes = socket.read_u32().await?;
         
+        // DEBUG: Log every request (for connection reuse investigation)
+        debug!(
+            partition_id = partition_id,
+            start_offset = start_offset,
+            max_bytes = max_bytes,
+            "Consumer request received"
+        );
+        
         // Validate partition ID
         if partition_id as usize >= partitions.len() {
             warn!(partition_id = partition_id, "Invalid partition ID");
@@ -88,6 +96,14 @@ async fn handle_consumer_connection(
         let total_bytes: usize = messages.iter().map(|m| m.size_bytes()).sum();
         MESSAGES_CONSUMED.inc_by(message_count as f64);
         BYTES_CONSUMED.inc_by(total_bytes as f64);
+        
+        // DEBUG: Log response details
+        debug!(
+            partition_id = partition_id,
+            messages_returned = message_count,
+            bytes_returned = response_bytes.len(),
+            "Consumer response sent"
+        );
         
         // Send: [length:u32][messages]
         socket.write_u32(response_bytes.len() as u32).await?;

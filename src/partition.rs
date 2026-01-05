@@ -1,14 +1,14 @@
 use crate::message::{IndexEntry, LogRecord, Message};
 use crate::metrics::{MESSAGES_PRODUCED, BYTES_PRODUCED};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 /// Configuration for a partition
 #[derive(Debug, Clone)]
@@ -49,26 +49,46 @@ impl Partition {
         // Create data directory
         std::fs::create_dir_all(&config.data_dir)?;
         
-        // Open log file
+        // EXPERT FIX: Open files with read+write (not append-only)
         let log_path = config.data_dir.join(format!("partition-{}.log", config.partition_id));
-        let log_file = OpenOptions::new()
+        let mut log_file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)  // Changed from append to write
             .open(&log_path)
             .context("Failed to open log file")?;
         
-        // Open index file
         let index_path = config.data_dir.join(format!("partition-{}.index", config.partition_id));
-        let index_file = OpenOptions::new()
+        let mut index_file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)  // Changed from append to write
             .open(&index_path)
             .context("Failed to open index file")?;
         
-        // Determine starting offset by reading last entry
-        let current_offset = Self::recover_offset(&log_file)?;
+        // EXPERT DIAGNOSTIC: Undeniable log BEFORE recovery
+        let log_len = log_file.metadata()?.len();
+        let index_len = index_file.metadata()?.len();
+        info!(
+            partition_id = config.partition_id,
+            log_path = %log_path.display(),
+            index_path = %index_path.display(),
+            log_len,
+            index_len,
+            "ABOUT TO RUN recover_by_scanning()"
+        );
+        
+        // EXPERT FIX: Proper recovery by scanning from byte 0
+        let recovered = Self::recover_by_scanning(
+            &mut log_file,
+            &mut index_file,
+            config.index_interval,
+            config.partition_id,
+        )?;
+        let current_offset = recovered.current_offset;
+        
+        // Seek to end for appending
+        log_file.seek(SeekFrom::End(0))?;
         
         info!(
             partition_id = config.partition_id,
@@ -232,6 +252,16 @@ impl Partition {
         let metadata = file.metadata()?;
         let file_size = metadata.len() as usize;
         
+        // EXPERT DIAGNOSTIC: Log position calculation
+        info!(
+            partition_id = self.config.partition_id,
+            start_offset,
+            max_bytes,
+            position,
+            file_size,
+            "read(): computed start position"
+        );
+        
         if position >= file_size {
             return Ok(Vec::new());
         }
@@ -250,11 +280,23 @@ impl Partition {
                 Ok(record) => {
                     if record.offset >= start_offset {
                         messages.push(record.to_message());
+                        bytes_read += record.length as usize;  // BUG FIX: Only count included messages
                     }
-                    cursor += record.length as usize;
-                    bytes_read += record.length as usize;
+                    cursor += record.length as usize;  // Always advance cursor
                 }
-                Err(_) => break,
+                Err(e) => {
+                    // EXPERT DIAGNOSTIC: Show WHERE and WHY deserialization fails
+                    error!(
+                        partition_id = self.config.partition_id,
+                        start_offset,
+                        cursor,
+                        position,
+                        file_size = slice.len(),
+                        error = ?e,
+                        "read(): LogRecord deserialize failed - THIS IS THE WALL"
+                    );
+                    break;
+                }
             }
         }
         
@@ -326,45 +368,166 @@ impl Partition {
         Ok(best_position)
     }
     
-    /// Recover the last offset from the log file
-    fn recover_offset(file: &File) -> Result<u64> {
-        let metadata = file.metadata()?;
-        if metadata.len() == 0 {
-            return Ok(0);
+    /// EXPERT FIX: Proper recovery by scanning from byte 0
+    /// Rebuilds index, enforces monotonic offsets, truncates corrupted tail
+    fn recover_by_scanning(
+        log_file: &mut File,
+        index_file: &mut File,
+        index_interval: u64,
+        partition_id: u32,
+    ) -> Result<RecoveredState> {
+        // EXPERT DIAGNOSTIC: Undeniable log at function entry
+        let log_len = log_file.metadata()?.len();
+        let index_len = index_file.metadata()?.len();
+        info!(
+            partition_id,
+            log_len,
+            index_len,
+            "recover_by_scanning() ENTERED"
+        );
+        
+        // Ensure we're at start of file
+        log_file.seek(SeekFrom::Start(0))?;
+        
+        if log_len == 0 {
+            info!(partition_id, "Empty log file, returning current_offset=0");
+            return Ok(RecoveredState {
+                current_offset: 0,
+                index_entries: Vec::new(),
+                last_good_pos: 0,
+            });
         }
         
-        // Read last 1 KB of file
-        let read_size = 1024.min(metadata.len() as usize);
-        let mmap = unsafe { memmap2::Mmap::map(file)? };
-        let total_len = mmap.len();
+        let mmap = unsafe { memmap2::Mmap::map(&*log_file)? };
+        let mut cur = Cursor::new(&mmap[..]);
         
-        if total_len == 0 {
-            return Ok(0);
-        }
+        let mut last_good_pos: u64 = 0;
+        let mut last_offset: Option<u64> = None;
+        let mut index_entries: Vec<IndexEntry> = Vec::new();
+        let mut record_count: u64 = 0;
         
-        let start = total_len.saturating_sub(read_size);
-        let slice = &mmap[start..];
-        
-        // Try to deserialize last record
-        let mut last_offset = 0;
-        let mut cursor = 0;
-        
-        while cursor < slice.len() {
-            match bincode::deserialize::<LogRecord>(&slice[cursor..]) {
-                Ok(record) => {
-                    last_offset = record.offset;
-                    cursor += record.length as usize;
+        // Scan from byte 0, tracking exact boundaries
+        while (cur.position() as usize) < mmap.len() {
+            let pos_before = cur.position();
+            
+            match bincode::deserialize_from::<_, LogRecord>(&mut cur) {
+                Ok(rec) => {
+                    let pos_after = cur.position();
+                    
+                    // CRITICAL: Enforce monotonic offsets
+                    if let Some(prev) = last_offset {
+                        if rec.offset <= prev {
+                            error!(
+                                prev_offset = prev,
+                                bad_offset = rec.offset,
+                                position = pos_before,
+                                "Non-monotonic offset detected - truncating here"
+                            );
+                            break;
+                        }
+                    }
+                    
+                    last_good_pos = pos_after;
+                    last_offset = Some(rec.offset);
+                    record_count += 1;
+                    
+                    // Rebuild index during scan
+                    if record_count % index_interval == 0 {
+                        index_entries.push(IndexEntry {
+                            offset: rec.offset,
+                            position: pos_before,
+                        });
+                    }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    // EXPERT DIAGNOSTIC: Show first 32 bytes if this is first failure
+                    if pos_before == 0 {
+                        let hex_dump: String = mmap.iter()
+                            .take(32.min(mmap.len()))
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        error!(
+                            partition_id,
+                            position = pos_before,
+                            file_len = mmap.len(),
+                            error = ?e,
+                            first_32_bytes = %hex_dump,
+                            "Decode failed at pos=0 - wrong file or wrong type?"
+                        );
+                    } else {
+                        error!(
+                            partition_id,
+                            position = pos_before,
+                            file_len = mmap.len(),
+                            error = ?e,
+                            "Decode failed during recovery - truncating tail"
+                        );
+                    }
+                    break;
+                }
             }
         }
         
-        Ok(last_offset + 1) // Next offset to use
+        // EXPERT FIX: Drop mmap before truncating
+        let need_truncate = last_good_pos as usize != mmap.len();
+        let file_len = mmap.len();
+        drop(mmap);  // Drop BEFORE any file operations
+        
+        // Truncate if needed
+        if need_truncate {
+            warn!(
+                partition_id,
+                from = file_len,
+                to = last_good_pos,
+                truncated_bytes = file_len as u64 - last_good_pos,
+                "Truncating log tail to last valid record"
+            );
+            log_file.set_len(last_good_pos)?;
+            log_file.sync_data()?;
+        }
+        
+        // Rebuild index file
+        index_file.set_len(0)?;  // Truncate existing index
+        index_file.seek(SeekFrom::Start(0))?;
+        
+        for entry in &index_entries {
+            let bytes = bincode::serialize(entry)?;
+            index_file.write_all(&bytes)?;
+        }
+        index_file.sync_data()?;
+        
+        let current_offset = last_offset.map(|o| o + 1).unwrap_or(0);
+        
+        // EXPERT DIAGNOSTIC: Must-appear completion log
+        info!(
+            partition_id,
+            records_scanned = record_count,
+            last_offset = ?last_offset,
+            current_offset,
+            last_good_pos,
+            index_entries = index_entries.len(),
+            log_len = file_len,
+            "recover_by_scanning() COMPLETE"
+        );
+        
+        Ok(RecoveredState {
+            current_offset,
+            index_entries,
+            last_good_pos,
+        })
     }
     
     pub fn current_offset(&self) -> u64 {
         self.current_offset.load(Ordering::SeqCst)
     }
+}
+
+/// Recovery state from scanning log file
+struct RecoveredState {
+    current_offset: u64,
+    index_entries: Vec<IndexEntry>,
+    last_good_pos: u64,
 }
 
 #[cfg(test)]

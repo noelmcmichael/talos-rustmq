@@ -51,6 +51,7 @@ metadata:
   namespace: data-pipeline
   labels:
     app: rustmq
+    monitoring: "true"
 spec:
   type: ClusterIP
   selector:

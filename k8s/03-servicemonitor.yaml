@@ -9,6 +9,7 @@ spec:
   selector:
     matchLabels:
       app: rustmq
+      monitoring: "true"
   endpoints:
   - port: metrics
     interval: 10s
